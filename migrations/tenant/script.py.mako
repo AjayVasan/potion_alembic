@@ -26,3 +26,8 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Downgrade schema."""
     ${downgrades if downgrades else "pass"}
+
+def check() -> None:
+    """check for sync between the tenants and metadata"""
+    "pass"
+    

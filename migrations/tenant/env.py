@@ -7,6 +7,10 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool,text
 
+from alembic.script import ScriptDirectory
+from sqlalchemy.exc import ProgrammingError
+from psycopg2.errors import UndefinedTable
+
 from alembic import context
 
 from models.tenant import Base
@@ -65,9 +69,16 @@ def run_migrations_online() -> None:
     """
     def migration_per_tenant(current_tenant):
         with connectable.connect() as connection:
-            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}_schema"'))
-            connection.execute(text(f'SET search_path TO "{current_tenant}_schema"'))
-            connection.commit()
+            if current_tenant.endswith("_schema"):
+                connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}"'))
+                connection.execute(text(f'SET search_path TO "{current_tenant}"'))
+                connection.commit()
+            else:
+                print(f"Applying 1st Migration for {current_tenant}")
+                connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}_schema"'))
+                connection.execute(text(f'SET search_path TO "{current_tenant}_schema"'))
+                connection.commit()
+                
 
             context.configure(
                 connection=connection,
@@ -78,27 +89,41 @@ def run_migrations_online() -> None:
 
             with context.begin_transaction():
                 context.run_migrations()
-    def populate_meta(org_id:int , org_name:str):
+    def populate_meta(org_id:str , org_name:str):
+
+        upsert_query = text("""
+                INSERT INTO public.tenants 
+                    (org_id, org_name, schema_name, plan_type, is_active, created_at, updated_at, has_schema)
+                VALUES 
+                    (:org_id, :org_name, :schema_name, :plan_type, :is_active, NOW(), NOW(), :has_schema)
+                ON CONFLICT (org_id) 
+                DO UPDATE SET
+                    schema_name = EXCLUDED.schema_name,
+                    plan_type = EXCLUDED.plan_type,
+                    is_active = EXCLUDED.is_active,
+                    has_schema = EXCLUDED.has_schema,
+                    updated_at = NOW(); 
+            """)
         with connectable.connect() as connection:
             connection.execute(text(f'SET search_path TO public'))
             connection.execute(
-                text("""
-                    INSERT INTO public.tenants 
-                    (org_id, org_name, schema_name, plan_type, is_active)
-                    VALUES 
-                    (:org_id, :org_name, :schema_name, :plan_type, :is_active)
-                """),
-                {
-                    "org_id": f"{org_id}",
-                    "org_name": f"{org_name}",
-                    "schema_name": f"{org_name}_schema",
-                    "plan_type": "basic",
-                    "is_active": True
-                }
+                upsert_query,
+                    {
+                        "org_id": f"{org_id}",
+                        "org_name": f"{org_name}",
+                        "schema_name": f"{org_name}_schema"
+                                        if isinstance(schema_names[i], str) and not schema_names[i].endswith("_schema")
+                                        else f"{org_name}",
+                        "plan_type": "basic",
+                        "is_active": True,
+                        "has_schema": True
+                    }
+                
             )
+            connection.commit()
 
     """
-    some really fucking important shit
+    some really important shit
     """
 
 
@@ -110,16 +135,67 @@ def run_migrations_online() -> None:
 
     current_tenant = context.get_x_argument(as_dictionary=True).get("tenant")
 
-    if str(current_tenant) != "all_orgs_":
-        migration_per_tenant(current_tenant)
-    else:
-        for i in ["ajay_dev/01","ajay_dev_2/02","ajay_nitroo/03"]: #DB Public.Tenants(tenant meta data )
+    if str(current_tenant) != "all_orgs_" and str(current_tenant) != "0":
+        if "/" in current_tenant:
+            l = current_tenant.split(("/"))
+            if len(l)==2:
+                id,org_name = l[0],l[-1]
+                migration_per_tenant(org_name)
+                populate_meta(id,org_name)
+            else:
+                print("Error Entry Format <id>/<org_name>")
+        else:
+            with connectable.connect() as connection:
+                connection.execute(text(f'SET search_path TO public'))
+                result = connection.execute(text(f"SELECT id FROM tenants ORDER BY created_at DESC LIMIT 1;"))
+                id = result.scalar()
+                migration_per_tenant(current_tenant)
+                populate_meta((current_tenant+str(id)),current_tenant)
 
-            migration_per_tenant(i.split("/")[0])
-            populate_meta(int(i.split("/")[1]),i.split("/")[0])
 
-
+    elif str(current_tenant) == "all_orgs_" and str(current_tenant) != "0":
+        with connectable.connect() as connection:
+            connection.execute(text(f'SET search_path TO public'))
+            result = connection.execute(text(f"select org_id, schema_name from tenants where has_schema = false order by created_at ASC"))
+            rows = result.all()
+            org_ids = [row.org_id for row in rows]
+            schema_names = [row.schema_name for row in rows]
+            if len(org_ids) == len(schema_names):
+                for i in range(len(org_ids)):
+                    migration_per_tenant(schema_names[i])
+                    populate_meta(org_ids[i],schema_names[i])
     
+    
+    else:
+        if str(current_tenant) == "0":
+            with connectable.connect() as connection:
+                connection.execute(text(f'SET search_path TO public'))
+                result = connection.execute(text(f"select org_id, schema_name from tenants"))
+                rows = result.all()
+                org_ids = [row.org_id for row in rows]
+                schema_names = [row.schema_name for row in rows]
+                if len(org_ids) == len(schema_names):
+                    for i in range(len(org_ids)):
+                        if isinstance(schema_names[i], str) and not schema_names[i].endswith("_schema"):
+                            connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}_schema"'))
+                            connection.execute(text(f'SET search_path TO "{schema_names[i]}_schema"'))
+                        else:
+                            connection.execute(text(f'SET search_path TO "{schema_names[i]}"'))
+                        try:
+                            alembic_result = connection.execute(text(f"select version_num from alembic_version"))
+                            tenant_alembic_version = alembic_result.all()
+                            script = ScriptDirectory.from_config(config)
+                            head_revision = script.get_current_head()
+                            if tenant_alembic_version != head_revision:
+                                migration_per_tenant(schema_names[i])
+                                populate_meta(org_ids[i],schema_names[i])
+                        except ProgrammingError as e:
+                            if isinstance(e.orig, UndefinedTable):
+                                print(f"Found a new entry appling migrations for that too org_schema_name:{schema_names[i]}, org_id: {org_ids[i]}")
+                                migration_per_tenant(schema_names[i])
+                                populate_meta(org_ids[i],schema_names[i])
+                            else:
+                                print(e)
 
 if context.is_offline_mode():
     run_migrations_offline()

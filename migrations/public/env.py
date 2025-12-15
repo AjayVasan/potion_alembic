@@ -77,7 +77,8 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection, 
             target_metadata=target_metadata,
-            version_table_schema="public"
+            version_table_schema="public",
+            compare_server_default=True
         )
 
         with context.begin_transaction():
