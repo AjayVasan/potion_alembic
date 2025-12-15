@@ -25,7 +25,7 @@ class Tenant(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     deleted_at = Column(DateTime(timezone=True), nullable=True)  # Soft delete
     has_schema = Column(Boolean,index=True,server_default=text("false"))
-    # test_public_meta_product = Column(String(1),nullable=True)
+    test_public_meta_product = Column(String(1),nullable=True)
 
 
     __table_args__ = (

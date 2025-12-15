@@ -2,6 +2,8 @@ import os
 import sys
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
+import re
+
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -14,6 +16,9 @@ from psycopg2.errors import UndefinedTable
 from alembic import context
 
 from models.tenant import Base
+
+import datetime
+from helper import get_create_date, log_system_audit, record_migration_history 
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -34,6 +39,9 @@ target_metadata = Base.metadata
 # can be acquired:
 # my_important_option = config.get_main_option("my_important_option")
 # ... etc.
+
+
+
 
 
 def run_migrations_offline() -> None:
@@ -68,6 +76,10 @@ def run_migrations_online() -> None:
 
     """
     def migration_per_tenant(current_tenant):
+
+        script = ScriptDirectory.from_config(config)
+        head_revision = script.get_current_head()
+
         with connectable.connect() as connection:
             if str(current_tenant).endswith("_schema"):
                 connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}"'))
@@ -79,6 +91,19 @@ def run_migrations_online() -> None:
                 connection.execute(text(f'SET search_path TO "{current_tenant}_schema"'))
                 connection.commit()
                 
+            tar_ten = f"{current_tenant}_schema" if not str(current_tenant).endswith("_schema")else f"{current_tenant}"
+            controller = script.get_revision(head_revision)
+            rev_time = get_create_date(controller)
+            
+            def on_version_apply_callback(ctx, step, heads, run_args):
+                log_system_audit(
+                    connection, 
+                    "MIGRATION_APPLIED", 
+                    tar_ten, 
+                    controller.doc, 
+                    rev_time
+                )
+                record_migration_history(ctx, step, heads, {"tenant_id": tar_ten})
 
             context.configure(
                 connection=connection,
@@ -87,6 +112,7 @@ def run_migrations_online() -> None:
                                         if not str(current_tenant).endswith("_schema")
                                         else f"{current_tenant}",
                 include_schemas=False,
+                on_version_apply=on_version_apply_callback
             )
 
             with context.begin_transaction():
@@ -146,33 +172,24 @@ def run_migrations_online() -> None:
                 populate_meta(id,org_name)
             else:
                 print("Error Entry Format <id>/<org_name>")
-        # 
         else:
-            # 1. Normalize the schema name
             target_schema = current_tenant
             if not target_schema.endswith("_schema"):
                 target_schema = f"{target_schema}_schema"
 
             with connectable.connect() as connection:
                 connection.execute(text(f'SET search_path TO public'))
-                
-                # 2. CHECK if tenant exists to get the REAL ID
-                # This prevents the UniqueViolation on schema_name
                 check_sql = text("SELECT org_id FROM public.tenants WHERE schema_name = :s")
                 existing_id = connection.execute(check_sql, {"s": target_schema}).scalar()
-                
                 if existing_id:
-                    # Use the ID that is already in the database
                     real_org_id = existing_id
                     print(f"Updating existing tenant: {real_org_id}")
                 else:
-                    # Only generate a new ID if it truly doesn't exist
                     res = connection.execute(text("SELECT id FROM tenants ORDER BY created_at DESC LIMIT 1"))
                     last_id = res.scalar() or 0
                     real_org_id = f"{current_tenant}{last_id}"
                     print(f"Creating new tenant: {real_org_id}")
 
-            # 3. Migrate and Update Metadata using the CORRECT ID
             migration_per_tenant(current_tenant)
             populate_meta(real_org_id, current_tenant)
 
