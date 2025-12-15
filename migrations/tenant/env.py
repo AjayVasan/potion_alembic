@@ -69,7 +69,7 @@ def run_migrations_online() -> None:
     """
     def migration_per_tenant(current_tenant):
         with connectable.connect() as connection:
-            if current_tenant.endswith("_schema"):
+            if str(current_tenant).endswith("_schema"):
                 connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}"'))
                 connection.execute(text(f'SET search_path TO "{current_tenant}"'))
                 connection.commit()
@@ -83,7 +83,9 @@ def run_migrations_online() -> None:
             context.configure(
                 connection=connection,
                 target_metadata=target_metadata,
-                version_table_schema=f"{current_tenant}_schema",
+                version_table_schema=f"{current_tenant}_schema"
+                                        if not str(current_tenant).endswith("_schema")
+                                        else f"{current_tenant}",
                 include_schemas=False,
             )
 
@@ -112,7 +114,7 @@ def run_migrations_online() -> None:
                         "org_id": f"{org_id}",
                         "org_name": f"{org_name}",
                         "schema_name": f"{org_name}_schema"
-                                        if isinstance(schema_names[i], str) and not schema_names[i].endswith("_schema")
+                                        if not str(org_name).endswith("_schema")
                                         else f"{org_name}",
                         "plan_type": "basic",
                         "is_active": True,
@@ -144,13 +146,35 @@ def run_migrations_online() -> None:
                 populate_meta(id,org_name)
             else:
                 print("Error Entry Format <id>/<org_name>")
+        # 
         else:
+            # 1. Normalize the schema name
+            target_schema = current_tenant
+            if not target_schema.endswith("_schema"):
+                target_schema = f"{target_schema}_schema"
+
             with connectable.connect() as connection:
                 connection.execute(text(f'SET search_path TO public'))
-                result = connection.execute(text(f"SELECT id FROM tenants ORDER BY created_at DESC LIMIT 1;"))
-                id = result.scalar()
-                migration_per_tenant(current_tenant)
-                populate_meta((current_tenant+str(id)),current_tenant)
+                
+                # 2. CHECK if tenant exists to get the REAL ID
+                # This prevents the UniqueViolation on schema_name
+                check_sql = text("SELECT org_id FROM public.tenants WHERE schema_name = :s")
+                existing_id = connection.execute(check_sql, {"s": target_schema}).scalar()
+                
+                if existing_id:
+                    # Use the ID that is already in the database
+                    real_org_id = existing_id
+                    print(f"Updating existing tenant: {real_org_id}")
+                else:
+                    # Only generate a new ID if it truly doesn't exist
+                    res = connection.execute(text("SELECT id FROM tenants ORDER BY created_at DESC LIMIT 1"))
+                    last_id = res.scalar() or 0
+                    real_org_id = f"{current_tenant}{last_id}"
+                    print(f"Creating new tenant: {real_org_id}")
+
+            # 3. Migrate and Update Metadata using the CORRECT ID
+            migration_per_tenant(current_tenant)
+            populate_meta(real_org_id, current_tenant)
 
 
     elif str(current_tenant) == "all_orgs_" and str(current_tenant) != "0":
@@ -176,7 +200,7 @@ def run_migrations_online() -> None:
                 schema_names = [row.schema_name for row in rows]
                 if len(org_ids) == len(schema_names):
                     for i in range(len(org_ids)):
-                        if isinstance(schema_names[i], str) and not schema_names[i].endswith("_schema"):
+                        if not str(schema_names[i]).endswith("_schema"):
                             connection.execute(text(f'CREATE SCHEMA IF NOT EXISTS "{current_tenant}_schema"'))
                             connection.execute(text(f'SET search_path TO "{schema_names[i]}_schema"'))
                         else:

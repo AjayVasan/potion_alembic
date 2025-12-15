@@ -31,7 +31,8 @@ class Customer(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     test_per_tenant_customer = Column(String(1),nullable=True)
-    test_tenant_specific_field = Column(String(100), nullable=True)
+    # test_tenant_specific_field = Column(String(100), nullable=True)
+    # new_test = Column(String(100), nullable=True)
 
 
     # Relationships
